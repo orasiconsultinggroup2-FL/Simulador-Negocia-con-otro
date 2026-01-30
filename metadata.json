@@ -1,0 +1,7 @@
+{
+  "name": "Negocia con otro | Orasi Lab",
+  "description": "Plataforma de entrenamiento de alto nivel para negociadores senior de Orasi Lab.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
