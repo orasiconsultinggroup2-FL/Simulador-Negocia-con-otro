@@ -1,8 +1,13 @@
-
 import { GoogleGenAI, Chat, Modality, Type } from "@google/genai";
 import { NegotiationContext, NegotiationResult } from "../types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+
+console.log("GoogleGenAI inicializado. API Key presente:", !!process.env.API_KEY);
+
+if (!process.env.API_KEY) {
+  console.warn("CRÍTICO: GEMINI_API_KEY no detectada. La conexión con Gemini fallará.");
+}
 
 const getVoiceForContext = (context: NegotiationContext): string => {
   const key = `${context.style}-${context.counterpartGender}`;
@@ -16,7 +21,6 @@ const getVoiceForContext = (context: NegotiationContext): string => {
     'acomodativo-masculino': 'Puck', 
     'acomodativo-femenino': 'Zephyr'
   };
-  // Nota: Dado que hay 5 voces predefinidas, se asignan para maximizar la distinción tonal según el estilo.
   return voiceMap[key] || 'Charon';
 };
 
@@ -59,9 +63,29 @@ const getSystemInstruction = (context: NegotiationContext) => `
   }
 `;
 
+const getVoiceSystemInstruction = (context: NegotiationContext) => `
+  Eres un NEGOCIADOR SENIOR (${context.counterpartGender.toUpperCase()}) de ORASI Lab. 
+  Tu función es ser una contraparte directa, seria y con autoridad. 
+  Habla de forma natural, concisa y profesional, como si estuvieras en una reunión de negocios real.
+  
+  REGLAS DE IDIOMA:
+  - Debes comunicarte EXCLUSIVAMENTE en ESPAÑOL.
+  - Todas tus respuestas y transcripciones deben ser en ESPAÑOL.
+  - No utilices el inglés bajo ninguna circunstancia.
+  
+  NO uses formato JSON en el modo voz. Responde directamente con lenguaje natural.
+  
+  Contexto:
+  - Contraparte: ${context.counterpart}
+  - Tema: ${context.topic}
+  - Tu Estilo: ${context.style}
+  
+  Mantén el realismo y defiende tus intereses con firmeza.
+`;
+
 export const createNegotiationChat = (context: NegotiationContext): Chat => {
   return ai.chats.create({
-    model: 'gemini-3-pro-preview',
+    model: 'gemini-3.1-pro-preview',
     config: {
       systemInstruction: getSystemInstruction(context),
       temperature: 0.6,
@@ -72,11 +96,12 @@ export const createNegotiationChat = (context: NegotiationContext): Chat => {
 
 export const connectLiveNegotiation = (context: NegotiationContext, callbacks: any) => {
   const voiceName = getVoiceForContext(context);
+  console.log(`Conectando a Live API con voz: ${voiceName} y modelo: gemini-2.5-flash-native-audio-preview-09-2025`);
   return ai.live.connect({
-    model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+    model: 'gemini-2.5-flash-native-audio-preview-09-2025',
     callbacks,
     config: {
-      systemInstruction: getSystemInstruction(context),
+      systemInstruction: getVoiceSystemInstruction(context),
       responseModalities: [Modality.AUDIO],
       speechConfig: {
         voiceConfig: { 
@@ -133,7 +158,7 @@ export async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
   const frameCount = dataInt16.length / numChannels;
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
