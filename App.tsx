@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { SetupForm } from './components/SetupForm';
 import { ChatInterface } from './components/ChatInterface';
@@ -26,7 +25,6 @@ const App: React.FC = () => {
   };
 
   const handleBackToSetup = () => {
-    // Al regresar al setup, conservamos el contexto para que el formulario esté pre-llenado
     setStage(AppStage.SETUP);
   };
 
@@ -39,7 +37,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
-      {/* Header con Branding Orasi Lab */}
       <header className="bg-white border-b border-slate-200 py-4 px-8 sticky top-0 z-20 shadow-sm">
         <div className="max-w-7xl mx-auto flex flex-col items-start">
           <div className="flex flex-col items-start">
@@ -59,7 +56,6 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-8">
         {stage === AppStage.SETUP && (
           <div className="space-y-12 animate-in fade-in slide-in-from-top-4 duration-500">
@@ -71,7 +67,6 @@ const App: React.FC = () => {
                 Enfréntate a un negociador senior con autoridad y perfecciona tu técnica comercial.
               </p>
             </div>
-            {/* Pasamos el contexto actual para que el formulario mantenga los datos si se regresa */}
             <SetupForm onStart={handleStart} initialData={context || undefined} />
           </div>
         )}
@@ -131,7 +126,6 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Footer */}
       <footer className="py-8 px-6 text-center text-slate-400 text-[10px] uppercase tracking-widest border-t border-slate-200 bg-white mt-auto">
         &copy; {new Date().getFullYear()} Orasi Lab. Desarrollo de Habilidades de Negociación.
       </footer>
