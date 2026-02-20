@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage, NegotiationResult, NegotiationContext } from '../types';
 import { Chat, LiveServerMessage } from '@google/genai';
@@ -21,7 +20,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, context, onF
   const scrollRef = useRef<HTMLDivElement>(null);
   const hasAutoFinished = useRef(false);
   
-  // Voice Mode Refs
   const audioContextInRef = useRef<AudioContext | null>(null);
   const audioContextOutRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef(0);
@@ -29,18 +27,15 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, context, onF
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const transcriptionRef = useRef({ user: '', model: '' });
 
-  // Timer Effect
   useEffect(() => {
     if (timeLeft <= 0 && !hasAutoFinished.current) {
       hasAutoFinished.current = true;
       handleSend(undefined, "Finalizar");
       return;
     }
-
     const timer = setInterval(() => {
       setTimeLeft((prev) => Math.max(0, prev - 1));
     }, 1000);
-
     return () => clearInterval(timer);
   }, [timeLeft]);
 
@@ -68,18 +63,16 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, context, onF
     try {
       const result = await chat.sendMessage({ message: textToSend });
       const modelText = result.text || '';
-
       const parsed = parseResult(modelText);
       if (parsed) {
         stopVoice();
         onFinish(parsed);
         return;
       }
-
       setMessages(prev => [...prev, { role: 'model', text: modelText }]);
     } catch (error) {
       console.error("Chat error:", error);
-      setMessages(prev => [...prev, { role: 'model', text: "Error de conexión. Por favor intenta de nuevo." }]);
+      setMessages(prev => [...prev, { role: 'model', text: "Error de conexión." }]);
     } finally {
       setLoading(false);
     }
@@ -92,7 +85,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, context, onF
     }
     if (audioContextInRef.current) audioContextInRef.current.close();
     if (audioContextOutRef.current) audioContextOutRef.current.close();
-    sourcesRef.current.forEach(s => s.stop());
+    sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
     sourcesRef.current.clear();
     setIsVoiceMode(false);
     setLiveStatus('disconnected');
@@ -100,107 +93,94 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, context, onF
 
   const startVoice = async () => {
     try {
+      console.log("Iniciando modo voz...");
       setLiveStatus('connecting');
       setIsVoiceMode(true);
       
-      audioContextInRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      audioContextOutRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
+      audioContextInRef.current = new AudioCtx({ sampleRate: 16000 });
+      audioContextOutRef.current = new AudioCtx({ sampleRate: 24000 });
+      
+      await audioContextInRef.current.resume();
+      await audioContextOutRef.current.resume();
       
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
       const sessionPromise = connectLiveNegotiation(context, {
         onopen: () => {
+          console.log("CONEXIÓN LIVE API ABIERTA EXITOSAMENTE");
           setLiveStatus('connected');
-          const source = audioContextInRef.current!.createMediaStreamSource(stream);
-          const processor = audioContextInRef.current!.createScriptProcessor(4096, 1, 1);
-          
+          if (!audioContextInRef.current) return;
+          const source = audioContextInRef.current.createMediaStreamSource(stream);
+          const processor = audioContextInRef.current.createScriptProcessor(4096, 1, 1);
           processor.onaudioprocess = (e) => {
             const inputData = e.inputBuffer.getChannelData(0);
             const int16 = new Int16Array(inputData.length);
             for (let i = 0; i < inputData.length; i++) {
-              int16[i] = inputData[i] * 32768;
+              int16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
             }
             const pcmBlob = {
               data: encodePCM(new Uint8Array(int16.buffer)),
               mimeType: 'audio/pcm;rate=16000',
             };
-            sessionPromise.then(s => s.sendRealtimeInput({ media: pcmBlob }));
+            sessionPromise.then(s => { if (s) s.sendRealtimeInput({ media: pcmBlob }); });
           };
-          
           source.connect(processor);
-          processor.connect(audioContextInRef.current!.destination);
+          processor.connect(audioContextInRef.current.destination);
         },
         onmessage: async (msg: LiveServerMessage) => {
-          if (msg.serverContent?.inputTranscription) {
+          console.log("Mensaje de Live API:", msg);
+          if (msg.serverContent?.inputTranscription?.text) {
             transcriptionRef.current.user += msg.serverContent.inputTranscription.text;
           }
-          if (msg.serverContent?.outputTranscription) {
-            transcriptionRef.current.model += msg.serverContent.outputTranscription.text;
+          if (msg.serverContent?.modelTurn) {
+            for (const part of msg.serverContent.modelTurn.parts) {
+              if (part.inlineData?.data && audioContextOutRef.current) {
+                const audioBase64 = part.inlineData.data;
+                const ctx = audioContextOutRef.current;
+                if (ctx.state === 'suspended') await ctx.resume();
+                nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+                const buffer = await decodeAudioData(decodePCM(audioBase64), ctx, 24000, 1);
+                const source = ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(ctx.destination);
+                source.start(nextStartTimeRef.current);
+                nextStartTimeRef.current += buffer.duration;
+                sourcesRef.current.add(source);
+                source.onended = () => sourcesRef.current.delete(source);
+              }
+              if (part.text) {
+                transcriptionRef.current.model += part.text;
+                if (part.text.includes('puntuacion_intereses')) {
+                  const parsed = parseResult(part.text);
+                  if (parsed) { stopVoice(); onFinish(parsed); }
+                }
+              }
+            }
           }
-          
+          if (msg.serverContent?.interrupted) {
+            sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
+            sourcesRef.current.clear();
+            nextStartTimeRef.current = 0;
+          }
           if (msg.serverContent?.turnComplete) {
             const uText = transcriptionRef.current.user;
             const mText = transcriptionRef.current.model;
             if (uText || mText) {
               setMessages(prev => [
-                ...prev, 
+                ...prev,
                 ...(uText ? [{ role: 'user' as const, text: uText }] : []),
                 ...(mText ? [{ role: 'model' as const, text: mText }] : [])
               ]);
             }
-            
-            if (uText.toLowerCase().includes('finalizar')) {
-              stopVoice();
-              handleSend(undefined, "Finalizar");
-            }
-            
             transcriptionRef.current = { user: '', model: '' };
           }
-
-          const audioBase64 = msg.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-          if (audioBase64 && audioContextOutRef.current) {
-            const ctx = audioContextOutRef.current;
-            nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-            const buffer = await decodeAudioData(decodePCM(audioBase64), ctx, 24000, 1);
-            const source = ctx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(ctx.destination);
-            source.start(nextStartTimeRef.current);
-            nextStartTimeRef.current += buffer.duration;
-            sourcesRef.current.add(source);
-            source.onended = () => sourcesRef.current.delete(source);
-          }
-
-          if (msg.serverContent?.interrupted) {
-            sourcesRef.current.forEach(s => s.stop());
-            sourcesRef.current.clear();
-            nextStartTimeRef.current = 0;
-          }
-
-          const potentialJson = msg.serverContent?.modelTurn?.parts[0]?.text;
-          if (potentialJson && potentialJson.includes('puntuacion_intereses')) {
-            const parsed = parseResult(potentialJson);
-            if (parsed) {
-              stopVoice();
-              onFinish(parsed);
-            }
-          }
         },
-        onerror: (e: any) => {
-          console.error("Live Error:", e);
-          stopVoice();
-        },
-        onclose: () => {
-          setLiveStatus('disconnected');
-          setIsVoiceMode(false);
-        }
+        onerror: (e: any) => { stopVoice(); },
+        onclose: () => { setLiveStatus('disconnected'); setIsVoiceMode(false); }
       });
-
       sessionRef.current = await sessionPromise;
-    } catch (err) {
-      console.error("Voice setup failed:", err);
-      stopVoice();
-    }
+    } catch (err) { stopVoice(); }
   };
 
   return (
@@ -213,116 +193,41 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ chat, context, onF
               {isVoiceMode ? `Modo Voz: ${liveStatus}` : 'Modo Escrito'}
             </span>
           </div>
-          
           <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono font-bold ${
             timeLeft < 60 ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-700 text-slate-300'
           }`}>
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
             {formatTime(timeLeft)}
           </div>
         </div>
-        
         <div className="flex gap-2">
-          <button 
-            onClick={isVoiceMode ? stopVoice : startVoice}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              isVoiceMode 
-                ? 'bg-red-600 hover:bg-red-700 text-white' 
-                : 'bg-blue-600 hover:bg-blue-700 text-white'
-            }`}
-          >
-            {isVoiceMode ? (
-              <><svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" /></svg> Detener Voz</>
-            ) : (
-              <><svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4z" /><path d="M4 8a1 1 0 011-1h1a1 1 0 010 2H5a1 1 0 01-1-1zM16 8a1 1 0 11-2 0 1 1 0 012 0zM10 13a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1z" /></svg> Activar Voz</>
-            )}
-          </button>
-          <button 
-            onClick={() => { setInput('Finalizar'); handleSend(); }}
-            className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg transition-colors"
-          >
-            Finalizar
+          <button onClick={isVoiceMode ? stopVoice : startVoice} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${isVoiceMode ? 'bg-red-600 text-white' : 'bg-blue-600 text-white'}`}>
+            {isVoiceMode ? 'Detener Voz' : 'Activar Voz'}
           </button>
         </div>
       </div>
-
-      {/* Progress bar */}
-      <div className="w-full h-1 bg-slate-200 overflow-hidden">
-        <div 
-          className={`h-full transition-all duration-1000 ease-linear ${timeLeft < 60 ? 'bg-red-500' : 'bg-blue-500'}`}
-          style={{ width: `${(timeLeft / (context.durationMinutes * 60)) * 100}%` }}
-        ></div>
-      </div>
-
       <div ref={scrollRef} className="flex-1 p-6 overflow-y-auto space-y-4 bg-slate-50">
-        {messages.length === 0 && !isVoiceMode && (
-          <div className="text-center py-20 text-slate-400">
-            <p className="text-lg italic">Envía tu primera propuesta o activa el Modo Voz...</p>
-            <p className="text-sm mt-2">Tienes {context.durationMinutes} minutos para cerrar el trato.</p>
-          </div>
-        )}
-        
-        {isVoiceMode && messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-4">
-             <div className="flex gap-1">
-                <div className="w-2 h-8 bg-blue-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                <div className="w-2 h-12 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                <div className="w-2 h-8 bg-blue-500 rounded-full animate-bounce"></div>
-             </div>
-             <p className="font-medium">Escuchando... Háblale a la contraparte</p>
-          </div>
-        )}
-
-        {messages.map((m, i) => (
-          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] px-4 py-3 rounded-2xl shadow-sm ${
-              m.role === 'user' 
-                ? 'bg-blue-600 text-white rounded-tr-none' 
-                : 'bg-white text-slate-800 border border-slate-200 rounded-tl-none'
-            }`}>
-              <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
+        {messages.map((m, i) => {
+          let displayText = m.text;
+          try {
+            if (m.role === 'model' && m.text.trim().startsWith('{')) {
+              const parsed = JSON.parse(m.text);
+              displayText = parsed.message || parsed.analisis_feedback || m.text;
+            }
+          } catch (e) {}
+          return (
+            <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] px-4 py-3 rounded-2xl shadow-sm ${m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white text-slate-800 border border-slate-200'}`}>
+                <p className="whitespace-pre-wrap leading-relaxed">{displayText}</p>
+              </div>
             </div>
-          </div>
-        ))}
-        {loading && !isVoiceMode && (
-          <div className="flex justify-start">
-            <div className="bg-white border border-slate-200 px-4 py-3 rounded-2xl rounded-tl-none animate-pulse flex gap-2">
-               <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
-               <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
-               <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
-            </div>
-          </div>
-        )}
+          );
+        })}
       </div>
-
       {!isVoiceMode && (
-        <form onSubmit={handleSend} className="p-4 bg-white border-t border-slate-200 flex gap-2 shrink-0">
-          <input
-            type="text"
-            placeholder="Escribe tu mensaje..."
-            className="flex-1 px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-          />
-          <button
-            type="submit"
-            disabled={loading}
-            className="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50 transition-all flex items-center gap-2"
-          >
-            {loading ? 'Pensando...' : 'Enviar'}
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-            </svg>
-          </button>
+        <form onSubmit={handleSend} className="p-4 bg-white border-t border-slate-200 flex gap-2">
+          <input type="text" placeholder="Escribe tu mensaje..." className="flex-1 px-4 py-3 rounded-lg border outline-none" value={input} onChange={e => setInput(e.target.value)} />
+          <button type="submit" disabled={loading} className="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold">Enviar</button>
         </form>
-      )}
-      
-      {isVoiceMode && (
-        <div className="p-4 bg-blue-50 border-t border-blue-100 text-center text-blue-800 text-sm font-medium">
-          La contraparte te escucha. Tiempo restante: {formatTime(timeLeft)}
-        </div>
       )}
     </div>
   );
