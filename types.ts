@@ -1,4 +1,3 @@
-
 export interface NegotiationContext {
   counterpart: string;
   topic: string;
